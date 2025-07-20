@@ -87,6 +87,83 @@ export interface DeploymentCircuitBreaker {
 }
 
 /**
+ * The hooks for blue-green deployments.
+ */
+export enum BlueGreenDeploymentLifecycleHook {
+  /**
+   * Corresponds to the `BeforeInstall` hook.
+   */
+  BEFORE_INSTALL = 'BeforeInstall',
+  /**
+   * Corresponds to the `AfterInstall` hook.
+   */
+  AFTER_INSTALL = 'AfterInstall',
+  /**
+   * Corresponds to the `BeforeAllowTraffic` hook.
+   */
+  BEFORE_ALLOW_TRAFFIC = 'BeforeAllowTraffic',
+  /**
+   * Corresponds to the `AfterAllowTraffic` hook.
+   */
+  AFTER_ALLOW_TRAFFIC = 'AfterAllowTraffic',
+  /**
+   * Corresponds to the `BeforeAllowTestTraffic` hook.
+   */
+  BEFORE_ALLOW_TEST_TRAFFIC = 'BeforeAllowTestTraffic',
+  /**
+   * Corresponds to the `AfterAllowTestTraffic` hook.
+   */
+  AFTER_ALLOW_TEST_TRAFFIC = 'AfterAllowTestTraffic',
+}
+
+/**
+ * The options for blue-green deployments
+ */
+export interface BlueGreenDeploymentConfiguration {
+  /**
+   * The hooks for blue-green deployments.
+   *
+   * @default - no hooks
+   */
+  readonly lifecycleHooks?: {
+    /**
+     * The name of the lifecycle hook.
+     */
+    readonly hookType: BlueGreenDeploymentLifecycleHook;
+    /**
+     * The ARN of the Lambda function to use for the hook.
+     */
+    readonly functionArn: string;
+  }[];
+  /**
+   * The termination wait time for the blue-green deployment.
+   *
+   * @default Duration.minutes(5)
+   */
+  readonly terminationWaitTime?: Duration;
+  /**
+   * The behavior on deployment failure.
+   *
+   * @default BlueGreenDeploymentFailureBehavior.ROLLBACK
+   */
+  readonly deploymentFailureBehavior?: BlueGreenDeploymentFailureBehavior;
+}
+
+/**
+ * The behavior on deployment failure for blue-green deployments.
+ */
+export enum BlueGreenDeploymentFailureBehavior {
+  /**
+   * Rollback the deployment on failure.
+   */
+  ROLLBACK = 'ROLLBACK',
+  /**
+   * Do nothing on failure.
+   */
+  DO_NOTHING = 'DO_NOTHING',
+}
+
+/**
  * Deployment behavior when an ECS Service Deployment Alarm is triggered
  */
 export enum AlarmBehavior {
@@ -388,6 +465,13 @@ export interface BaseServiceOptions {
    * @default - disabled
    */
   readonly circuitBreaker?: DeploymentCircuitBreaker;
+
+  /**
+   * The configuration for blue-green deployments.
+   *
+   * @default - no blue-green deployment
+   */
+  readonly blueGreenDeploymentConfiguration?: BlueGreenDeploymentConfiguration;
 
   /**
    * The alarm(s) to monitor during deployment, and behavior to apply if at least one enters a state of alarm
@@ -701,6 +785,20 @@ export abstract class BaseService extends Resource
           rollback: props.circuitBreaker.rollback ?? false,
         } : undefined,
         alarms: Lazy.any({ produce: () => this.deploymentAlarms }, { omitEmptyArray: true }),
+        blueGreenDeploymentConfiguration: props.blueGreenDeploymentConfiguration ? {
+          deploymentReadyOption: {
+            actionOnTimeout: props.blueGreenDeploymentConfiguration.deploymentFailureBehavior ?? BlueGreenDeploymentFailureBehavior.ROLLBACK,
+            waitTimeInMinutes: props.blueGreenDeploymentConfiguration.terminationWaitTime?.toMinutes() ?? 5,
+          },
+          terminateBlueInstancesOnDeploymentSuccess: {
+            action: 'TERMINATE',
+            terminationWaitTimeInSeconds: props.blueGreenDeploymentConfiguration.terminationWaitTime?.toSeconds() ?? 300,
+          },
+          lifecycleHooks: props.blueGreenDeploymentConfiguration.lifecycleHooks?.map(h => ({
+            hookType: h.hookType,
+            functionArn: h.functionArn,
+          })),
+        } : undefined,
       },
       propagateTags: propagateTagsFromSource === PropagatedTagSource.NONE ? undefined : props.propagateTags,
       enableEcsManagedTags: props.enableECSManagedTags ?? false,
@@ -727,6 +825,10 @@ export abstract class BaseService extends Resource
         && deploymentController
         && deploymentController.type !== DeploymentControllerType.ECS) {
       Annotations.of(this).addError('Deployment circuit breaker requires the ECS deployment controller.');
+    }
+
+    if (props.blueGreenDeploymentConfiguration && deploymentController && deploymentController.type !== DeploymentControllerType.ECS) {
+      Annotations.of(this).addError('Blue-green deployment requires the ECS deployment controller.');
     }
 
     if (props.deploymentAlarms
@@ -1078,6 +1180,12 @@ export abstract class BaseService extends Resource
       // This is undesirable behavior (the controller is implicitly ECS anyway when left
       // undefined, so specifying it is not necessary but DOES trigger a CFN replacement)
       // but we leave it in for backwards compat.
+      return {
+        type: DeploymentControllerType.ECS,
+      };
+    }
+
+    if (props.blueGreenDeploymentConfiguration) {
       return {
         type: DeploymentControllerType.ECS,
       };
